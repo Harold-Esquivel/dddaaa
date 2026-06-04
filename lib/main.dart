@@ -1,31 +1,18 @@
-/*
- * ============================================================
- *  Flutter App — Cliente BLE
- *  Se conecta al ESP32 "BiometricSensor" y recibe datos
- *
- *  Dependencias (pubspec.yaml):
- *    flutter_blue_plus: ^1.32.0
- *
- *  Permisos:
- *    Android: ACCESS_FINE_LOCATION, BLUETOOTH_SCAN, BLUETOOTH_CONNECT
- *    iOS:     NSBluetoothAlwaysUsageDescription en Info.plist
- *
- *  Reemplaza el contenido de lib/main.dart con este archivo.
- * ============================================================
- */
-
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
-// ── UUIDs (deben coincidir con el ESP32) ────────────────────
-const String kServiceUUID        = "12345678-1234-1234-1234-123456789abc";
+const String kServiceUUID = "12345678-1234-1234-1234-123456789abc";
 const String kCharacteristicUUID = "12345678-1234-1234-1234-123456789abd";
-const String kDeviceName         = "BiometricSensor";
+const String kDeviceName = "BiometricSensor";
 
-// ────────────────────────────────────────────────────────────
-void main() => runApp(const BiometricApp());
+// ─────────────────────────────────────────────────────────────────────────────
+// App Root
+// ─────────────────────────────────────────────────────────────────────────────
+void main() {
+  runApp(const BiometricApp());
+}
 
 class BiometricApp extends StatelessWidget {
   const BiometricApp({super.key});
@@ -33,20 +20,21 @@ class BiometricApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BiometricSensor',
       debugShowCheckedModeBanner: false,
+      title: 'BiometricSensor BLE',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        colorSchemeSeed: Colors.teal,
         useMaterial3: true,
+        brightness: Brightness.dark,
       ),
       home: const ScanPage(),
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PANTALLA DE ESCANEO
-// ═══════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// SCAN PAGE
+// ─────────────────────────────────────────────────────────────────────────────
 class ScanPage extends StatefulWidget {
   const ScanPage({super.key});
 
@@ -55,112 +43,350 @@ class ScanPage extends StatefulWidget {
 }
 
 class _ScanPageState extends State<ScanPage> {
-  final List<ScanResult> _results = [];
-  bool _isScanning = false;
+  final Map<String, ScanResult> _devicesMap = {};
   StreamSubscription? _scanSub;
+  StreamSubscription? _isScanSub;
+  bool _scanning = false;
+
+  List<ScanResult> get _devices {
+    final list = _devicesMap.values.toList();
+    // Primero el ESP32 objetivo, luego el resto por nombre
+    list.sort((a, b) {
+      final aIsTarget = a.device.platformName == kDeviceName;
+      final bIsTarget = b.device.platformName == kDeviceName;
+      if (aIsTarget && !bIsTarget) return -1;
+      if (!aIsTarget && bIsTarget) return 1;
+      // Ordenar por RSSI (más fuerte primero)
+      return b.rssi.compareTo(a.rssi);
+    });
+    return list;
+  }
 
   @override
   void dispose() {
     _scanSub?.cancel();
+    _isScanSub?.cancel();
+    FlutterBluePlus.stopScan();
     super.dispose();
   }
 
-  // ── Iniciar escaneo ────────────────────────────────────
-  void _startScan() async {
-    setState(() {
-      _results.clear();
-      _isScanning = true;
-    });
+  Future<void> _startScan() async {
+    _devicesMap.clear();
+    setState(() => _scanning = true);
 
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+    await _scanSub?.cancel();
+    await _isScanSub?.cancel();
 
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
-      for (ScanResult r in results) {
-        if (!_results.any((e) => e.device.remoteId == r.device.remoteId)) {
-          setState(() => _results.add(r));
+      bool changed = false;
+      for (final r in results) {
+        final id = r.device.remoteId.toString();
+        if (!_devicesMap.containsKey(id) || _devicesMap[id]!.rssi != r.rssi) {
+          _devicesMap[id] = r;
+          changed = true;
         }
       }
+      if (changed && mounted) setState(() {});
     });
 
-    FlutterBluePlus.isScanning.listen((scanning) {
-      if (!scanning && mounted) setState(() => _isScanning = false);
+    _isScanSub = FlutterBluePlus.isScanning.listen((value) {
+      if (mounted) setState(() => _scanning = value);
     });
+
+    try {
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 12),
+        androidUsesFineLocation: true,
+      );
+    } catch (e) {
+      debugPrint('Scan error: $e');
+      if (mounted) setState(() => _scanning = false);
+    }
   }
 
-  // ── Conectar al dispositivo seleccionado ───────────────
-  void _connect(BluetoothDevice device) async {
+  Future<void> _stopScan() async {
     await FlutterBluePlus.stopScan();
-    if (!mounted) return;
+  }
 
+  Future<void> _connect(BluetoothDevice device) async {
+    await _stopScan();
+    if (!mounted) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => DataPage(device: device),
-      ),
+      MaterialPageRoute(builder: (_) => DataPage(device: device)),
+    );
+  }
+
+  // Convierte RSSI a icono de señal
+  Widget _rssiIcon(int rssi) {
+    IconData icon;
+    Color color;
+    if (rssi >= -60) {
+      icon = Icons.signal_wifi_4_bar;
+      color = Colors.greenAccent;
+    } else if (rssi >= -75) {
+      icon = Icons.network_wifi_3_bar;
+      color = Colors.yellowAccent;
+    } else if (rssi >= -85) {
+      icon = Icons.network_wifi_2_bar;
+      color = Colors.orangeAccent;
+    } else {
+      icon = Icons.network_wifi_1_bar;
+      color = Colors.redAccent;
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: color, size: 20),
+        Text('$rssi', style: TextStyle(fontSize: 10, color: color)),
+      ],
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final devices = _devices;
+
     return Scaffold(
+      backgroundColor: const Color(0xFF0D1117),
       appBar: AppBar(
-        title: const Text('Buscar BiometricSensor'),
-        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+        backgroundColor: const Color(0xFF161B22),
+        title: const Row(
+          children: [
+            Icon(Icons.bluetooth, color: Colors.tealAccent),
+            SizedBox(width: 8),
+            Text(
+              'ESP32 BLE Scanner',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          if (_scanning)
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.tealAccent,
+                ),
+              ),
+            ),
+        ],
       ),
       body: Column(
         children: [
-          // ── Botón de escaneo ─────────────────────────
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _isScanning ? null : _startScan,
-                icon: _isScanning
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Icon(Icons.bluetooth_searching),
-                label: Text(_isScanning ? 'Escaneando...' : 'Escanear'),
-              ),
+          // ── BOTÓN ESCANEAR ────────────────────────────────────────────────
+          Container(
+            color: const Color(0xFF161B22),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _scanning
+                          ? Colors.grey.shade800
+                          : Colors.teal,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    icon: Icon(_scanning ? Icons.radar : Icons.search),
+                    label: Text(
+                      _scanning ? 'Escaneando...' : 'Buscar dispositivos BLE',
+                      style: const TextStyle(fontSize: 15),
+                    ),
+                    onPressed: _scanning ? null : _startScan,
+                  ),
+                ),
+                if (_scanning) ...[
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: _stopScan,
+                    icon: const Icon(
+                      Icons.stop_circle,
+                      color: Colors.redAccent,
+                      size: 30,
+                    ),
+                    tooltip: 'Detener',
+                  ),
+                ],
+              ],
             ),
           ),
 
-          // ── Lista de dispositivos ────────────────────
-          Expanded(
-            child: ListView.builder(
-              itemCount: _results.length,
-              itemBuilder: (ctx, i) {
-                final r = _results[i];
-                final name = r.device.platformName.isEmpty
-                    ? 'Desconocido'
-                    : r.device.platformName;
-                final isTarget = name == kDeviceName;
-
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  elevation: isTarget ? 3 : 0,
-                  color: isTarget
-                      ? Theme.of(context).colorScheme.primaryContainer
-                      : null,
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.bluetooth,
-                      color: isTarget ? Colors.teal : Colors.grey,
-                    ),
-                    title: Text(name,
-                        style: TextStyle(
-                            fontWeight: isTarget ? FontWeight.bold : FontWeight.normal)),
-                    subtitle: Text(r.device.remoteId.toString()),
-                    trailing: Text('${r.rssi} dBm',
-                        style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    onTap: () => _connect(r.device),
+          // ── ESTADO / CONTADOR ─────────────────────────────────────────────
+          if (devices.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: Row(
+                children: [
+                  Text(
+                    '${devices.length} dispositivo${devices.length != 1 ? 's' : ''} encontrado${devices.length != 1 ? 's' : ''}',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
                   ),
-                );
-              },
+                ],
+              ),
             ),
+
+          // ── LISTA DE DISPOSITIVOS ─────────────────────────────────────────
+          Expanded(
+            child: devices.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.bluetooth_searching,
+                          size: 64,
+                          color: Colors.grey.shade700,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          _scanning
+                              ? 'Buscando dispositivos cercanos...'
+                              : 'Presiona "Buscar" para iniciar',
+                          style: TextStyle(color: Colors.grey.shade500),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: devices.length,
+                    itemBuilder: (_, i) {
+                      final result = devices[i];
+                      final name = result.device.platformName.isEmpty
+                          ? 'Sin nombre'
+                          : result.device.platformName;
+                      final isTarget =
+                          result.device.platformName == kDeviceName;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Material(
+                          color: isTarget
+                              ? const Color(0xFF0D2818)
+                              : const Color(0xFF1C2128),
+                          borderRadius: BorderRadius.circular(12),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () => _connect(result.device),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isTarget
+                                      ? Colors.tealAccent.withOpacity(0.5)
+                                      : Colors.white10,
+                                  width: isTarget ? 1.5 : 1,
+                                ),
+                              ),
+                              padding: const EdgeInsets.all(14),
+                              child: Row(
+                                children: [
+                                  // Icono Bluetooth
+                                  Container(
+                                    width: 48,
+                                    height: 48,
+                                    decoration: BoxDecoration(
+                                      color: isTarget
+                                          ? Colors.teal.withOpacity(0.2)
+                                          : Colors.white.withOpacity(0.05),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      isTarget
+                                          ? Icons.monitor_heart
+                                          : Icons.bluetooth,
+                                      color: isTarget
+                                          ? Colors.tealAccent
+                                          : Colors.grey.shade400,
+                                      size: 24,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+
+                                  // Nombre + MAC
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Text(
+                                              name,
+                                              style: TextStyle(
+                                                color: isTarget
+                                                    ? Colors.tealAccent
+                                                    : Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 15,
+                                              ),
+                                            ),
+                                            if (isTarget) ...[
+                                              const SizedBox(width: 6),
+                                              Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2,
+                                                    ),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.teal
+                                                      .withOpacity(0.3),
+                                                  borderRadius:
+                                                      BorderRadius.circular(4),
+                                                ),
+                                                child: const Text(
+                                                  'ESP32',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.tealAccent,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          result.device.remoteId.toString(),
+                                          style: TextStyle(
+                                            color: Colors.grey.shade500,
+                                            fontSize: 12,
+                                            fontFamily: 'monospace',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+
+                                  // RSSI
+                                  _rssiIcon(result.rssi),
+                                  const SizedBox(width: 8),
+                                  const Icon(
+                                    Icons.chevron_right,
+                                    color: Colors.white30,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -168,9 +394,9 @@ class _ScanPageState extends State<ScanPage> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PANTALLA DE DATOS EN TIEMPO REAL
-// ═══════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA PAGE — con reconexión automática
+// ─────────────────────────────────────────────────────────────────────────────
 class DataPage extends StatefulWidget {
   final BluetoothDevice device;
   const DataPage({super.key, required this.device});
@@ -179,201 +405,341 @@ class DataPage extends StatefulWidget {
   State<DataPage> createState() => _DataPageState();
 }
 
-class _DataPageState extends State<DataPage> {
-  // ── Estado de conexión ─────────────────────────────────
-  String _status        = 'Conectando...';
-  bool   _connected     = false;
+class _DataPageState extends State<DataPage>
+    with SingleTickerProviderStateMixin {
+  // Estado de conexión
+  bool _connected = false;
+  bool _connecting = false;
+  bool _disposed = false;
+  String _status = 'Conectando...';
 
-  // ── Datos biométricos parseados ───────────────────────
-  int    _bpm           = 0;
-  double _spo2          = 0;
-  double _ax = 0, _ay = 0, _az = 0;
-  double _gx = 0, _gy = 0, _gz = 0;
-  String _rawData       = '--';
+  // Datos BLE
+  String _rawData = '--';
+  int _bpm = 0;
+  String _state = 'WAITING';
 
-  StreamSubscription? _connectionSub;
+  // Streams
   StreamSubscription? _notifySub;
+  StreamSubscription? _connectionSub;
+
+  // Reconexión
+  static const int _maxRetries = 3;
+  int _retries = 0;
+
+  // Animación de pulso
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnim;
 
   @override
   void initState() {
     super.initState();
-    _connectAndSubscribe();
-  }
-
-  // ── Conectar y suscribirse a notificaciones ─────────
-  Future<void> _connectAndSubscribe() async {
-    try {
-      await widget.device.connect(timeout: const Duration(seconds: 15));
-      setState(() => _status = 'Conectado ✓');
-
-      // Observar desconexiones
-      _connectionSub = widget.device.connectionState.listen((state) {
-        if (state == BluetoothConnectionState.disconnected && mounted) {
-          setState(() {
-            _connected = false;
-            _status = 'Desconectado';
-          });
-        }
-      });
-
-      // Descubrir servicios
-      List<BluetoothService> services = await widget.device.discoverServices();
-
-      for (BluetoothService service in services) {
-        if (service.uuid.toString().toLowerCase() == kServiceUUID) {
-          for (BluetoothCharacteristic c in service.characteristics) {
-            if (c.uuid.toString().toLowerCase() == kCharacteristicUUID) {
-              // Activar notificaciones
-              await c.setNotifyValue(true);
-
-              _notifySub = c.onValueReceived.listen((value) {
-                final text = utf8.decode(value);
-                _parseData(text);
-              });
-
-              setState(() {
-                _connected = true;
-                _status    = 'Recibiendo datos ▶';
-              });
-              return;
-            }
-          }
-        }
-      }
-
-      setState(() => _status = 'Error: servicio no encontrado');
-    } catch (e) {
-      setState(() => _status = 'Error: $e');
-    }
-  }
-
-  // ── Parsear CSV del ESP32 ────────────────────────────
-  // Formato: BPM:72,SPO2:98.5,AX:-0.12,AY:0.04,AZ:9.81,GX:0.01,GY:-0.02,GZ:0.00
-  void _parseData(String raw) {
-    setState(() => _rawData = raw);
-    try {
-      final Map<String, double> fields = {};
-      for (final part in raw.split(',')) {
-        final kv = part.split(':');
-        if (kv.length == 2) {
-          fields[kv[0].trim()] = double.tryParse(kv[1].trim()) ?? 0;
-        }
-      }
-      setState(() {
-        _bpm  = fields['BPM']?.toInt() ?? _bpm;
-        _spo2 = fields['SPO2'] ?? _spo2;
-        _ax   = fields['AX']   ?? _ax;
-        _ay   = fields['AY']   ?? _ay;
-        _az   = fields['AZ']   ?? _az;
-        _gx   = fields['GX']   ?? _gx;
-        _gy   = fields['GY']   ?? _gy;
-        _gz   = fields['GZ']   ?? _gz;
-      });
-    } catch (_) {}
-  }
-
-  // ── Desconectar limpiamente ──────────────────────────
-  Future<void> _disconnect() async {
-    await _notifySub?.cancel();
-    await _connectionSub?.cancel();
-    await widget.device.disconnect();
-    if (mounted) Navigator.pop(context);
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _pulseAnim = Tween(
+      begin: 1.0,
+      end: 1.25,
+    ).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeOut));
+    _connectToDevice();
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _pulseController.dispose();
     _notifySub?.cancel();
     _connectionSub?.cancel();
     widget.device.disconnect();
     super.dispose();
   }
 
-  // ────────────────────────────────────────────────────
+  // ── CONEXIÓN PRINCIPAL ────────────────────────────────────────────────────
+  Future<void> _connectToDevice() async {
+    if (_disposed) return;
+    _setStatus('Conectando...', connecting: true, connected: false);
+
+    // Desconectar limpiamente si ya estaba conectado
+    try {
+      await _notifySub?.cancel();
+      await _connectionSub?.cancel();
+      await widget.device.disconnect();
+    } catch (_) {}
+
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (_disposed) return;
+
+    try {
+      await widget.device.connect(
+        timeout: const Duration(seconds: 15),
+        autoConnect: false,
+      );
+
+      if (_disposed) return;
+
+      // Escuchar desconexiones
+      _connectionSub = widget.device.connectionState.listen(
+        _onConnectionStateChange,
+      );
+
+      // Descubrir servicios
+      _setStatus(
+        'Descubriendo servicios...',
+        connecting: true,
+        connected: false,
+      );
+      final services = await widget.device.discoverServices();
+
+      BluetoothCharacteristic? targetChar;
+      for (final svc in services) {
+        if (svc.uuid.toString().toLowerCase() == kServiceUUID) {
+          for (final c in svc.characteristics) {
+            if (c.uuid.toString().toLowerCase() == kCharacteristicUUID) {
+              targetChar = c;
+              break;
+            }
+          }
+        }
+        if (targetChar != null) break;
+      }
+
+      if (targetChar == null) {
+        _setStatus(
+          'Servicio BLE no encontrado\n(UUID no coincide)',
+          connecting: false,
+          connected: false,
+        );
+        return;
+      }
+
+      // Activar notificaciones
+      await targetChar.setNotifyValue(true);
+      _notifySub = targetChar.onValueReceived.listen(_onDataReceived);
+
+      _retries = 0;
+      _setStatus('Recibiendo datos', connecting: false, connected: true);
+    } on FlutterBluePlusException catch (e) {
+      debugPrint('BLE connect error: $e');
+      _handleConnectionError(e.toString());
+    } catch (e) {
+      debugPrint('General error: $e');
+      _handleConnectionError(e.toString());
+    }
+  }
+
+  void _onConnectionStateChange(BluetoothConnectionState state) {
+    if (_disposed) return;
+    if (state == BluetoothConnectionState.disconnected && _connected) {
+      _setStatus('Desconectado', connecting: false, connected: false);
+      _autoReconnect();
+    }
+  }
+
+  void _handleConnectionError(String error) {
+    if (_disposed) return;
+    _setStatus('Error: $error', connecting: false, connected: false);
+    _autoReconnect();
+  }
+
+  void _autoReconnect() {
+    if (_disposed || _retries >= _maxRetries) {
+      if (!_disposed && _retries >= _maxRetries) {
+        _setStatus(
+          'No se pudo conectar\ndespués de $_maxRetries intentos',
+          connecting: false,
+          connected: false,
+        );
+      }
+      return;
+    }
+    _retries++;
+    _setStatus(
+      'Reconectando (intento $_retries/$_maxRetries)...',
+      connecting: true,
+      connected: false,
+    );
+    Future.delayed(const Duration(seconds: 2), _connectToDevice);
+  }
+
+  void _setStatus(
+    String msg, {
+    required bool connecting,
+    required bool connected,
+  }) {
+    if (_disposed || !mounted) return;
+    setState(() {
+      _status = msg;
+      _connecting = connecting;
+      _connected = connected;
+    });
+  }
+
+  // ── DATOS BLE ─────────────────────────────────────────────────────────────
+  void _onDataReceived(List<int> value) {
+    final text = utf8.decode(value, allowMalformed: true);
+    debugPrint('BLE DATA: $text');
+    _parseData(text);
+  }
+
+  void _parseData(String raw) {
+    int tempBpm = _bpm;
+    String tempState = _state;
+
+    for (final part in raw.split(',')) {
+      final kv = part.split(':');
+      if (kv.length != 2) continue;
+      if (kv[0].trim() == 'BPM') {
+        tempBpm = int.tryParse(kv[1].trim()) ?? tempBpm;
+      }
+      if (kv[0].trim() == 'STATE') {
+        tempState = kv[1].trim();
+      }
+    }
+
+    if (!_disposed && mounted) {
+      setState(() {
+        _bpm = tempBpm;
+        _state = tempState;
+        _rawData = raw;
+      });
+      // Animación de latido cuando cambia BPM
+      if (tempBpm != _bpm) {
+        _pulseController.forward(from: 0);
+      }
+    }
+  }
+
+  Future<void> _disconnect() async {
+    _disposed = true;
+    await _notifySub?.cancel();
+    await _connectionSub?.cancel();
+    try {
+      await widget.device.disconnect();
+    } catch (_) {}
+    if (mounted) Navigator.pop(context);
+  }
+
+  // ── BUILD ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final bool alert = _state == 'SOMNOLENCIA';
+    final bool waiting = _state == 'WAITING';
 
     return Scaffold(
+      backgroundColor: const Color(0xFF0D1117),
       appBar: AppBar(
-        title: Text(widget.device.platformName.isEmpty
-            ? 'BiometricSensor'
-            : widget.device.platformName),
-        backgroundColor: cs.primaryContainer,
+        backgroundColor: const Color(0xFF161B22),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.device.platformName.isEmpty
+                  ? 'Dispositivo BLE'
+                  : widget.device.platformName,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            Text(
+              widget.device.remoteId.toString(),
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.bluetooth_disabled),
-            tooltip: 'Desconectar',
             onPressed: _disconnect,
+            icon: const Icon(Icons.bluetooth_disabled, color: Colors.redAccent),
+            tooltip: 'Desconectar',
           ),
         ],
       ),
-
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // ── Estado ──────────────────────────────
-            _StatusChip(status: _status, connected: _connected),
-            const SizedBox(height: 20),
-
-            // ── Pulsómetro / SpO2 ───────────────────
-            Row(children: [
-              Expanded(child: _BigMetricCard(
-                icon: Icons.favorite,
-                color: Colors.red,
-                label: 'Frec. Cardíaca',
-                value: '$_bpm',
-                unit: 'BPM',
-              )),
-              const SizedBox(width: 12),
-              Expanded(child: _BigMetricCard(
-                icon: Icons.air,
-                color: Colors.blue,
-                label: 'SpO₂',
-                value: _spo2.toStringAsFixed(1),
-                unit: '%',
-              )),
-            ]),
-            const SizedBox(height: 12),
-
-            // ── Acelerómetro ─────────────────────────
-            _SensorSection(
-              title: 'Acelerómetro (m/s²)',
-              icon: Icons.speed,
-              rows: [
-                ('X', _ax), ('Y', _ay), ('Z', _az),
-              ],
+            // ── STATUS ──────────────────────────────────────────────────────
+            _StatusCard(
+              connected: _connected,
+              connecting: _connecting,
+              status: _status,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
-            // ── Giroscopio ───────────────────────────
-            _SensorSection(
-              title: 'Giroscopio (rad/s)',
-              icon: Icons.rotate_90_degrees_ccw,
-              rows: [
-                ('X', _gx), ('Y', _gy), ('Z', _gz),
-              ],
+            // ── BPM ─────────────────────────────────────────────────────────
+            AnimatedBuilder(
+              animation: _pulseAnim,
+              builder: (_, child) {
+                return Transform.scale(
+                  scale: _connected ? _pulseAnim.value : 1.0,
+                  child: child,
+                );
+              },
+              child: _BpmCard(bpm: _bpm, connected: _connected),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
-            // ── Datos crudos ──────────────────────────
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Último paquete raw',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                    const SizedBox(height: 6),
-                    Text(_rawData,
-                        style: const TextStyle(
-                            fontFamily: 'monospace', fontSize: 11, color: Colors.grey)),
-                  ],
-                ),
+            // ── ESTADO ──────────────────────────────────────────────────────
+            _StateCard(state: _state, alert: alert, waiting: waiting),
+            const SizedBox(height: 14),
+
+            // ── RAW DATA ────────────────────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1C2128),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Datos RAW',
+                    style: TextStyle(
+                      color: Colors.grey.shade500,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _rawData,
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
               ),
             ),
+
+            // ── BOTÓN RECONECTAR MANUAL ─────────────────────────────────────
+            if (!_connected && !_connecting) ...[
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Reintentar conexión'),
+                  onPressed: () {
+                    _disposed = false;
+                    _retries = 0;
+                    _connectToDevice();
+                  },
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -381,146 +747,180 @@ class _DataPageState extends State<DataPage> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  WIDGETS AUXILIARES
-// ═══════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDGETS AUXILIARES
+// ─────────────────────────────────────────────────────────────────────────────
 
-class _StatusChip extends StatelessWidget {
-  final String status;
+class _StatusCard extends StatelessWidget {
   final bool connected;
-  const _StatusChip({required this.status, required this.connected});
+  final bool connecting;
+  final String status;
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: connected ? Colors.green.shade50 : Colors.orange.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-            color: connected ? Colors.green.shade200 : Colors.orange.shade200),
-      ),
-      child: Row(
-        children: [
-          Icon(connected ? Icons.check_circle : Icons.hourglass_top,
-              size: 16,
-              color: connected ? Colors.green : Colors.orange),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(status,
-                style: TextStyle(
-                    color: connected ? Colors.green.shade700 : Colors.orange.shade700,
-                    fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BigMetricCard extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final String label;
-  final String value;
-  final String unit;
-
-  const _BigMetricCard({
-    required this.icon,
-    required this.color,
-    required this.label,
-    required this.value,
-    required this.unit,
+  const _StatusCard({
+    required this.connected,
+    required this.connecting,
+    required this.status,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
-        child: Column(
-          children: [
-            Icon(icon, color: color, size: 28),
-            const SizedBox(height: 6),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.bold,
-                    color: color)),
-            Text(unit, style: const TextStyle(color: Colors.grey, fontSize: 13)),
-            const SizedBox(height: 4),
-            Text(label,
-                style:
-                    const TextStyle(fontSize: 11, color: Colors.grey),
-                textAlign: TextAlign.center),
-          ],
-        ),
+    Color borderColor;
+    Color iconColor;
+    IconData icon;
+
+    if (connected) {
+      borderColor = Colors.tealAccent.withOpacity(0.5);
+      iconColor = Colors.tealAccent;
+      icon = Icons.check_circle;
+    } else if (connecting) {
+      borderColor = Colors.amber.withOpacity(0.4);
+      iconColor = Colors.amber;
+      icon = Icons.sync;
+    } else {
+      borderColor = Colors.redAccent.withOpacity(0.4);
+      iconColor = Colors.redAccent;
+      icon = Icons.error_outline;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C2128),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: borderColor, width: 1.5),
+      ),
+      child: Row(
+        children: [
+          connecting
+              ? SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: iconColor,
+                  ),
+                )
+              : Icon(icon, color: iconColor, size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              status,
+              style: TextStyle(color: Colors.grey.shade300, fontSize: 14),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _SensorSection extends StatelessWidget {
-  final String title;
-  final IconData icon;
-  final List<(String, double)> rows;
+class _BpmCard extends StatelessWidget {
+  final int bpm;
+  final bool connected;
 
-  const _SensorSection(
-      {required this.title, required this.icon, required this.rows});
+  const _BpmCard({required this.bpm, required this.connected});
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, size: 16, color: Colors.grey),
-                const SizedBox(width: 6),
-                Text(title,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 13)),
-              ],
-            ),
-            const Divider(height: 16),
-            ...rows.map((row) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                          width: 20,
-                          child: Text(row.$1,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.grey))),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: LinearProgressIndicator(
-                          value: ((row.$2 + 20) / 40).clamp(0, 1),
-                          backgroundColor: Colors.grey.shade200,
-                          minHeight: 6,
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      SizedBox(
-                        width: 64,
-                        child: Text(
-                          row.$2.toStringAsFixed(3),
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                              fontFamily: 'monospace', fontSize: 12),
-                        ),
-                      ),
-                    ],
-                  ),
-                )),
-          ],
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C2128),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: connected ? Colors.red.withOpacity(0.3) : Colors.white10,
         ),
+      ),
+      child: Column(
+        children: [
+          Icon(
+            Icons.favorite,
+            color: connected ? Colors.redAccent : Colors.grey,
+            size: 52,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            bpm > 0 ? '$bpm' : '--',
+            style: TextStyle(
+              fontSize: 72,
+              fontWeight: FontWeight.bold,
+              color: connected ? Colors.white : Colors.grey,
+              height: 1,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'BPM',
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontSize: 16,
+              letterSpacing: 3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StateCard extends StatelessWidget {
+  final String state;
+  final bool alert;
+  final bool waiting;
+
+  const _StateCard({
+    required this.state,
+    required this.alert,
+    required this.waiting,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Color bg;
+    Color border;
+    Color textColor;
+    IconData icon;
+
+    if (waiting) {
+      bg = const Color(0xFF1C2128);
+      border = Colors.white12;
+      textColor = Colors.grey;
+      icon = Icons.hourglass_empty;
+    } else if (alert) {
+      bg = Colors.red.shade900.withOpacity(0.4);
+      border = Colors.redAccent.withOpacity(0.6);
+      textColor = Colors.redAccent.shade100;
+      icon = Icons.warning_amber_rounded;
+    } else {
+      bg = Colors.teal.shade900.withOpacity(0.3);
+      border = Colors.tealAccent.withOpacity(0.4);
+      textColor = Colors.tealAccent.shade100;
+      icon = Icons.check_circle_outline;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 16),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border, width: 1.5),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: textColor, size: 48),
+          const SizedBox(height: 10),
+          Text(
+            state,
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.bold,
+              color: textColor,
+              letterSpacing: 2,
+            ),
+          ),
+        ],
       ),
     );
   }
